@@ -1,0 +1,23 @@
+{
+  "name": "wol",
+  "version": "1.0.0",
+  "main": "wol-ai-proxy.js",
+  "scripts": {
+    "start": "export $(grep '^#' $(pwd)/.env -v | xargs) && node wol-ai-proxy.js"
+  },
+  "keywords": [
+    "wakeonlan",
+    "proxy",
+    "wol",
+    "express"
+  ],
+  "author": "Chema Alfonso <hola@chemaalfonso.com>",
+  "license": "MIT",
+  "description": "WoL Proxy Server sets up a proxy server that can wake a system using Wake-on-LAN (WoL) and proxy requests to it.",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "http-proxy-middleware": "^3.0.2",
+    "wake_on_lan": "^1.0.0"
+  }
+}
