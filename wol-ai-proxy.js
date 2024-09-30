@@ -28,124 +28,130 @@ const logger = (error, type = 'info') => {
 // ===================================
 // Config
 // ===================================
-const config = {
-	proxyTo: process.env.PROXY_TO,
-	port: process.env.PORT,
+const proxyToArray = process.env.PROXY_TO.split(',').map(item => item.trim())
+const portArray = process.env.PORT.split(',').map(item => item.trim())
+const macAddressArray = process.env.MAC_ADDRESS.split(',').map(item => item.trim())
+
+const configs = proxyToArray.map((proxyTo, index) => ({
+	proxyTo,
+	port: portArray[index],
 	wol: {
-		macAddress: process.env.MAC_ADDRESS,
+		macAddress: macAddressArray[index],
 		checkTimeout: process.env.CHECK_TIMEOUT || 5000,
 		checkInterval: process.env.CHECK_INTERVAL || 5000,
 		maxWaitTime: process.env.MAX_WAIT_TIME || 60000
 	}
-}
+}))
 
-if (!config.proxyTo || !config.port || !config.wol.macAddress) {
-	logger('Missing required environment variables. Exiting...', 'error')
-	process.exit(1)
-}
+configs.forEach(config => {
+	if (!config.proxyTo || !config.port || !config.wol.macAddress) {
+		logger('Missing required environment variables. Exiting...', 'error')
+		process.exit(1)
+	}
 
-// ===================================
-// WoL
-// ===================================
-/*
- * @param {string} mac
- * @returns {Promise<string>}
- *
- * @example
- * wakeOnLan('00:11:22:33:44:55')
- */
-const wakeOnLan = async mac => {
-	return new Promise((resolve, reject) => {
-		wol.wake(mac, function (error) {
-			if (error) {
-				reject('Error sending magic packet')
+	// ===================================
+	// WoL
+	// ===================================
+	/*
+	 * @param {string} mac
+	 * @returns {Promise<string>}
+	 *
+	 * @example
+	 * wakeOnLan('00:11:22:33:44:55')
+	 */
+	const wakeOnLan = async mac => {
+		return new Promise((resolve, reject) => {
+			wol.wake(mac, function (error) {
+				if (error) {
+					reject('Error sending magic packet')
+				} else {
+					resolve('Magic packet sent successfully')
+				}
+			})
+		})
+	}
+
+	/*
+	 * @returns {Promise<boolean>}
+	 *
+	 * @example
+	 * const hostOnline = await isHostOnline()
+	 */
+	const isHostOnline = async () => {
+		const controller = new AbortController()
+		const timeout = setTimeout(() => {
+			controller.abort()
+		}, config.wol.checkTimeout)
+
+		try {
+			const response = await fetch(`${config.proxyTo}`, { signal: controller.signal })
+			clearTimeout(timeout)
+			return response.ok
+		} catch (error) {
+			if (error.name === 'AbortError') {
+				logger('Fetch request timed out')
 			} else {
-				resolve('Magic packet sent successfully')
+				logger(error)
 			}
+			return false
+		}
+	}
+
+	// ===================================
+	// Init app
+	// ===================================
+	const app = express()
+
+	// Base status endpoint
+	app.get('/wolstatus', async (req, res) => {
+		const hostOnline = await isHostOnline()
+		res.send({
+			ok: true,
+			server: 'ok',
+			proxiedService: hostOnline ? 'ok' : 'ko'
 		})
 	})
-}
 
-/*
- * @returns {Promise<boolean>}
- *
- * @example
- * const hostOnline = await isHostOnline()
- */
-const isHostOnline = async () => {
-	const controller = new AbortController()
-	const timeout = setTimeout(() => {
-		controller.abort()
-	}, config.wol.checkTimeout)
+	// ===================================
+	// WoL Middleware
+	// ===================================
+	app.use(async (req, res, next) => {
+		if (!(await isHostOnline())) {
+			logger('System is offline. Sending WoL magic packet...')
 
-	try {
-		const response = await fetch(`${config.proxyTo}`, { signal: controller.signal })
-		clearTimeout(timeout)
-		return response.ok
-	} catch (error) {
-		if (error.name === 'AbortError') {
-			logger('Fetch request timed out')
-		} else {
-			logger(error)
-		}
-		return false
-	}
-}
+			await wakeOnLan(config.wol.macAddress)
 
-// ===================================
-// Init app
-// ===================================
-const app = express()
+			let hostOnline = false
+			const start = Date.now()
 
-// Base status endpoint
-app.get('/wolstatus', async (req, res) => {
-	const hostOnline = await isHostOnline()
-	res.send({
-		ok: true,
-		server: 'ok',
-		proxiedService: hostOnline ? 'ok' : 'ko'
-	})
-})
+			while (!hostOnline && Date.now() - start < config.wol.maxWaitTime) {
+				hostOnline = await isHostOnline()
+				if (!hostOnline) await new Promise(resolve => setTimeout(resolve, config.wol.checkInterval))
+			}
 
-// ===================================
-// WoL Middleware
-// ===================================
-app.use(async (req, res, next) => {
-	if (!(await isHostOnline())) {
-		logger('System is offline. Sending WoL magic packet...')
-
-		await wakeOnLan(config.wol.macAddress)
-
-		let hostOnline = false
-		const start = Date.now()
-
-		while (!hostOnline && Date.now() - start < config.wol.maxWaitTime) {
-			hostOnline = await isHostOnline()
-			if (!hostOnline) await new Promise(resolve => setTimeout(resolve, config.wol.checkInterval))
+			if (!hostOnline) return res.status(504).send('The system did not turn on in time.')
 		}
 
-		if (!hostOnline) return res.status(504).send('The system did not turn on in time.')
-	}
+		logger('Proxied system is on, continuing...')
 
-	logger('Proxied system is on, continuing...')
-
-	next()
-})
-
-// ===================================
-// Proxy Middleware
-// ===================================
-app.use(
-	'/',
-	createProxyMiddleware({
-		target: config.proxyTo,
-		changeOrigin: true
+		next()
 	})
-)
 
-// ===================================
-// Server start
-// ===================================
-app.listen(config.port, () => {
-	logger(`WoL proxy server is running on port ${config.port}`)
+	// ===================================
+	// Proxy Middleware
+	// ===================================
+	app.use(
+		'/',
+		createProxyMiddleware({
+			target: config.proxyTo,
+			changeOrigin: true
+		})
+	)
+
+	// ===================================
+	// Server start
+	// ===================================
+	app.listen(config.port, () => {
+		logger(`WoL proxy server is running on port ${config.port}`)
+	})
 })
